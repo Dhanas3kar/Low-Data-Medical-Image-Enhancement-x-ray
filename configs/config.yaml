@@ -8,7 +8,7 @@ data:
   val_split: 0.1
   test_split: 0.1
   image_size: 256
-  batch_size: 4
+  batch_size: 8
   num_workers: 0
 
 model:
@@ -19,13 +19,13 @@ model:
   dropout: 0.2
 
 training:
-  epochs: 100
-  learning_rate: 0.001
+  epochs: 150
+  learning_rate: 0.0005
   lr_step_size: 20
   lr_gamma: 0.5
   optimizer: "Adam"  # alternatives: AdamW, SGD
-  loss_function: "MSE"  # alternatives: L1, SSIM, Perceptual
-  early_stopping_patience: 15
+  loss_function: "L1"  # alternatives: L1, SSIM, Perceptual
+  early_stopping_patience: 20
   save_interval: 10
   print_interval: 1
 
@@ -50,6 +50,6 @@ paths:
   logs_dir: "./logs"
 
 inference:
-  device: "auto"  # auto, cpu, cuda
+  device: "cuda"  # auto, cpu, cuda
   batch_size: 4
   save_visuals: true
