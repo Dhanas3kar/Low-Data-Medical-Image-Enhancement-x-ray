@@ -1,52 +1,95 @@
 """
-Inference script for image enhancement.
+Inference script for image enhancement with robust error handling.
 """
 
 import torch
 import numpy as np
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 import yaml
 import cv2
+import logging
 
-from .model import UNet
+from .model import UNet, get_model
 from .utils import ImageProcessor, Visualizer, print_model_summary
+
+logger = logging.getLogger(__name__)
 
 
 class ImageEnhancer:
-    """Image enhancement inference class."""
+    """Image enhancement inference class with robust error handling."""
     
     def __init__(self, model_path: str, config_path: str = 'configs/config.yaml',
-                 device: Optional[torch.device] = None):
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                 device: Optional[torch.device] = None, architecture: str = 'UNet'):
+        """
+        Initialize ImageEnhancer with model loading and configuration.
         
-        # Load config
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+        Args:
+            model_path: Path to model weights
+            config_path: Path to config YAML
+            device: Torch device (cpu/cuda)
+            architecture: Model architecture name
+            
+        Raises:
+            FileNotFoundError: If model or config not found
+            ValueError: If config is invalid
+        """
+        # Setup device
+        if device is None:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device
         
-        # Initialize model
-        self.model = UNet(
-            in_channels=self.config['model']['in_channels'],
-            out_channels=self.config['model']['out_channels'],
-            depth=self.config['model']['depth'],
-            dropout=self.config['model']['dropout']
-        ).to(self.device)
+        logger.info(f"Using device: {self.device}")
         
-        # Load weights
-        if Path(model_path).exists():
+        # Load and validate config
+        config_path = Path(config_path)
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config not found: {config_path}")
+        
+        try:
+            with open(config_path, 'r') as f:
+                self.config = yaml.safe_load(f)
+            logger.info(f"Config loaded from: {config_path}")
+        except Exception as e:
+            raise ValueError(f"Failed to load config: {str(e)}")
+        
+        # Validate config structure
+        required_keys = {'model', 'inference'}
+        if not all(key in self.config for key in required_keys):
+            raise ValueError(f"Config missing required keys: {required_keys}")
+        
+        # Initialize model with error handling
+        try:
+            self.model = get_model(
+                architecture=architecture,
+                in_channels=self.config['model'].get('in_channels', 1),
+                out_channels=self.config['model'].get('out_channels', 1),
+                depth=self.config['model'].get('depth', 3),
+                dropout=self.config['model'].get('dropout', 0.2)
+            ).to(self.device)
+            logger.info(f"Model initialized: {architecture}")
+        except Exception as e:
+            raise ValueError(f"Failed to initialize model: {str(e)}")
+        
+        # Load weights with validation
+        model_path = Path(model_path)
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model weights not found: {model_path}")
+        
+        try:
             weights = torch.load(model_path, map_location=self.device)
             self.model.load_state_dict(weights)
-            print(f"✓ Model loaded from: {model_path}")
-        else:
-            raise FileNotFoundError(f"Model not found at {model_path}")
+            logger.info(f"Model weights loaded: {model_path}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load model weights: {str(e)}")
         
         self.model.eval()
         print_model_summary(self.model)
     
     def enhance_image(self, image: np.ndarray, resize: Optional[Tuple[int, int]] = None,
-                     return_all: bool = False) -> np.ndarray:
+                     return_all: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """
-        Enhance single image with automatic size handling.
+        Enhance single image with automatic size handling and validation.
         
         Args:
             image: Input image (H, W) or (C, H, W)
@@ -55,7 +98,24 @@ class ImageEnhancer:
         
         Returns:
             Enhanced image or tuple of (input, enhanced)
+            
+        Raises:
+            TypeError: If image is not ndarray
+            ValueError: If image has invalid shape or is empty
         """
+        # Input validation
+        if not isinstance(image, np.ndarray):
+            raise TypeError(f"Expected np.ndarray, got {type(image)}")
+        
+        if image.size == 0:
+            raise ValueError("Image is empty")
+        
+        if image.ndim not in [2, 3]:
+            raise ValueError(f"Image must be 2D or 3D, got {image.ndim}D")
+        
+        if not np.isfinite(image).all():
+            raise ValueError("Image contains NaN or infinite values")
+        
         # Prepare input
         if image.ndim == 2:
             image = image[np.newaxis, :, :]  # Add channel dimension
@@ -64,64 +124,105 @@ class ImageEnhancer:
         orig_shape = image.shape
         
         # Normalize to [0, 1]
-        image = ImageProcessor.normalize(image)
+        image_normalized = ImageProcessor.normalize(image)
         
         # Determine resize target (default to 256x256)
         if resize is None:
             resize = (256, 256)
+        elif not isinstance(resize, tuple) or len(resize) != 2:
+            raise ValueError(f"resize must be tuple of 2 ints, got {resize}")
         
         # Resize for model input
-        image_resized = ImageProcessor.resize(image, resize)
+        try:
+            image_resized = ImageProcessor.resize(image_normalized, resize)
+        except Exception as e:
+            raise RuntimeError(f"Failed to resize image: {str(e)}")
         
         # Add batch dimension for model
-        image_tensor = torch.FloatTensor(image_resized).unsqueeze(0).to(self.device)
+        try:
+            image_tensor = torch.FloatTensor(image_resized).unsqueeze(0).to(self.device)
+        except Exception as e:
+            raise RuntimeError(f"Failed to convert image to tensor: {str(e)}")
         
         # Model inference
-        with torch.no_grad():
-            enhanced_tensor = self.model(image_tensor)
+        try:
+            with torch.no_grad():
+                enhanced_tensor = self.model(image_tensor)
+        except Exception as e:
+            raise RuntimeError(f"Model inference failed: {str(e)}")
         
-        # Remove batch dimension and clip
-        enhanced = enhanced_tensor.squeeze(0).cpu().numpy()
-        enhanced = np.clip(enhanced, 0, 1)
+        # Post-processing
+        try:
+            enhanced = enhanced_tensor.squeeze(0).cpu().numpy()
+            enhanced = np.clip(enhanced, 0, 1)
+            
+            # Resize back to original size if needed
+            if enhanced.shape[-2:] != orig_shape[-2:]:
+                enhanced = ImageProcessor.resize(enhanced, (orig_shape[-2], orig_shape[-1]))
+        except Exception as e:
+            raise RuntimeError(f"Post-processing failed: {str(e)}")
         
-        # Resize back to original size
-        if enhanced.shape[-2:] != orig_shape[-2:]:
-            enhanced = ImageProcessor.resize(enhanced, (orig_shape[-2], orig_shape[-1]))
+        logger.info(f"Image enhanced successfully. Shape: {enhanced.shape}")
         
         if return_all:
-            return image, enhanced
+            return image_normalized, enhanced
         return enhanced
     
-    def enhance_batch(self, images: np.ndarray) -> np.ndarray:
+    def enhance_batch(self, images: np.ndarray, batch_size: Optional[int] = None) -> np.ndarray:
         """
-        Enhance batch of images.
+        Enhance batch of images with memory-efficient processing.
         
         Args:
             images: Batch of images (B, C, H, W) or (B, H, W)
+            batch_size: Processing batch size (for memory efficiency)
         
         Returns:
             Enhanced batch
+            
+        Raises:
+            TypeError: If images is not ndarray
+            ValueError: If images has invalid shape
         """
+        if not isinstance(images, np.ndarray):
+            raise TypeError(f"Expected np.ndarray, got {type(images)}")
+        
+        if images.size == 0:
+            raise ValueError("Images array is empty")
+        
         if images.ndim == 3:
             images = images[:, np.newaxis, :, :]  # Add channel dimension
+        elif images.ndim != 4:
+            raise ValueError(f"Images must be 3D or 4D, got {images.ndim}D")
         
-        # Normalize
-        images = np.array([ImageProcessor.normalize(img) for img in images])
-        
-        # Convert to tensor
-        images_tensor = torch.FloatTensor(images).to(self.device)
-        
-        # Inference
-        with torch.no_grad():
-            enhanced_tensor = self.model(images_tensor)
-        
-        enhanced = enhanced_tensor.cpu().numpy()
-        return np.clip(enhanced, 0, 1)
+        try:
+            # Normalize
+            normalized = np.array([ImageProcessor.normalize(img) for img in images])
+            
+            # Use config batch size if not specified
+            if batch_size is None:
+                batch_size = self.config['inference'].get('batch_size', 4)
+            
+            # Process in batches
+            enhanced_list = []
+            for i in range(0, len(normalized), batch_size):
+                batch = normalized[i:i+batch_size]
+                batch_tensor = torch.FloatTensor(batch).to(self.device)
+                
+                with torch.no_grad():
+                    enhanced_tensor = self.model(batch_tensor)
+                
+                enhanced_list.append(enhanced_tensor.cpu().numpy())
+            
+            enhanced = np.vstack(enhanced_list)
+            logger.info(f"Batch enhanced: {enhanced.shape}")
+            return np.clip(enhanced, 0, 1)
+        except Exception as e:
+            raise RuntimeError(f"Batch enhancement failed: {str(e)}")
     
     def enhance_from_file(self, image_path: str, save_path: Optional[str] = None,
                          visualize: bool = True) -> np.ndarray:
         """
-        Load image from file, enhance it, and optionally save.
+        Load image from file, enhance it, and optionally save with error handling.
         
         Args:
             image_path: Path to input image
@@ -130,24 +231,45 @@ class ImageEnhancer:
         
         Returns:
             Enhanced image
+            
+        Raises:
+            FileNotFoundError: If image not found
+            ValueError: If image loading fails
         """
-        # Load image
-        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-        if img is None:
+        # Validate input path
+        image_path = Path(image_path)
+        if not image_path.exists():
             raise FileNotFoundError(f"Image not found: {image_path}")
+        
+        # Load image with error handling
+        try:
+            img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                raise ValueError(f"Failed to read image or unsupported format")
+        except Exception as e:
+            raise ValueError(f"Failed to load image: {str(e)}")
         
         # Convert to [0, 1]
         img = img.astype(np.float32) / 255.0
         
         # Enhance
-        print(f"Enhancing image: {image_path}")
-        enhanced = self.enhance_image(img)
+        try:
+            logger.info(f"Enhancing image: {image_path}")
+            enhanced = self.enhance_image(img)
+        except Exception as e:
+            raise RuntimeError(f"Enhancement failed: {str(e)}")
         
         # Save enhanced image
         if save_path:
-            save_img = (enhanced.squeeze() * 255).astype(np.uint8)
-            cv2.imwrite(save_path, save_img)
-            print(f"✓ Enhanced image saved to: {save_path}")
+            try:
+                save_path = Path(save_path)
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                save_img = (enhanced.squeeze() * 255).astype(np.uint8)
+                cv2.imwrite(str(save_path), save_img)
+                logger.info(f"Enhanced image saved: {save_path}")
+            except Exception as e:
+                logger.error(f"Failed to save enhanced image: {str(e)}")
+                raise RuntimeError(f"Failed to save image: {str(e)}")
         
         # Visualization
         if visualize:

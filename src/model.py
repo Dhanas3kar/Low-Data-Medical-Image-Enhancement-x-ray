@@ -1,12 +1,27 @@
 import torch
 import torch.nn as nn
+import logging
+from typing import Optional, List
+
+logger = logging.getLogger(__name__)
 
 
 class UNet(nn.Module):
     """Lightweight UNet for medical image enhancement with low data constraints."""
     
-    def __init__(self, in_channels=1, out_channels=1, depth=3, dropout=0.2):
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, depth: int = 3, dropout: float = 0.2):
         super(UNet, self).__init__()
+        
+        # Input validation
+        if not isinstance(depth, int) or depth < 1 or depth > 5:
+            raise ValueError(f"depth must be an integer between 1 and 5, got {depth}")
+        if not isinstance(dropout, (int, float)) or not 0 <= dropout < 1:
+            raise ValueError(f"dropout must be between 0 and 1, got {dropout}")
+        if not isinstance(in_channels, int) or in_channels < 1:
+            raise ValueError(f"in_channels must be positive integer, got {in_channels}")
+        if not isinstance(out_channels, int) or out_channels < 1:
+            raise ValueError(f"out_channels must be positive integer, got {out_channels}")
+        
         self.depth = depth
         
         # Encoder
@@ -46,7 +61,17 @@ class UNet(nn.Module):
             nn.ReLU(inplace=True),
         )
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with input validation and robustness."""
+        if not isinstance(x, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(x)}")
+        if x.dim() not in [3, 4]:
+            raise ValueError(f"Expected 3D or 4D tensor, got {x.dim()}D tensor")
+        
+        # Ensure 4D tensor (B,C,H,W)
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+        
         encoder_outputs = []
         
         # Encoder
@@ -73,8 +98,14 @@ class UNet(nn.Module):
 class ResidualBlock(nn.Module):
     """Residual block with option for dense connections."""
     
-    def __init__(self, in_channels, out_channels, dropout=0.2):
+    def __init__(self, in_channels: int, out_channels: int, dropout: float = 0.2):
         super(ResidualBlock, self).__init__()
+        
+        if not isinstance(in_channels, int) or in_channels < 1:
+            raise ValueError(f"in_channels must be positive integer, got {in_channels}")
+        if not isinstance(out_channels, int) or out_channels < 1:
+            raise ValueError(f"out_channels must be positive integer, got {out_channels}")
+        
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
@@ -90,7 +121,11 @@ class ResidualBlock(nn.Module):
                 nn.BatchNorm2d(out_channels)
             )
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with residual connection."""
+        if not isinstance(x, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(x)}")
+        
         residual = self.skip(x)
         out = self.conv1(x)
         out = self.bn1(out)
@@ -106,8 +141,12 @@ class ResidualBlock(nn.Module):
 class ResUNet(nn.Module):
     """UNet with residual blocks for enhanced feature learning."""
     
-    def __init__(self, in_channels=1, out_channels=1, depth=3, dropout=0.2):
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, depth: int = 3, dropout: float = 0.2):
         super(ResUNet, self).__init__()
+        
+        if not isinstance(depth, int) or depth < 1 or depth > 5:
+            raise ValueError(f"depth must be between 1 and 5, got {depth}")
+        
         self.depth = depth
         
         # Encoder
@@ -142,7 +181,16 @@ class ResUNet(nn.Module):
         # Final output layer
         self.final = nn.Conv2d(channels[1], out_channels, 1)
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with input validation."""
+        if not isinstance(x, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(x)}")
+        if x.dim() not in [3, 4]:
+            raise ValueError(f"Expected 3D or 4D tensor, got {x.dim()}D")
+        
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+        
         encoder_outputs = []
         
         # Encoder
@@ -169,8 +217,14 @@ class ResUNet(nn.Module):
 class DenseBlock(nn.Module):
     """Dense block with concatenated feature maps."""
     
-    def __init__(self, in_channels, growth_rate=16, num_layers=4, dropout=0.2):
+    def __init__(self, in_channels: int, growth_rate: int = 16, num_layers: int = 4, dropout: float = 0.2):
         super(DenseBlock, self).__init__()
+        
+        if not isinstance(num_layers, int) or num_layers < 1:
+            raise ValueError(f"num_layers must be positive integer, got {num_layers}")
+        if not isinstance(growth_rate, int) or growth_rate < 1:
+            raise ValueError(f"growth_rate must be positive integer, got {growth_rate}")
+        
         self.layers = nn.ModuleList()
         self.growth_rate = growth_rate
         
@@ -185,7 +239,8 @@ class DenseBlock(nn.Module):
                 )
             )
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with feature concatenation."""
         features = [x]
         for layer in self.layers:
             out = layer(torch.cat(features, 1))
@@ -193,24 +248,37 @@ class DenseBlock(nn.Module):
         return torch.cat(features, 1)
 
 
-def get_model(architecture='UNet', in_channels=1, out_channels=1, depth=3, 
-              dropout=0.2, **kwargs) -> nn.Module:
-    """Factory function to get model based on architecture name."""
+def get_model(architecture: str = 'UNet', in_channels: int = 1, out_channels: int = 1, depth: int = 3, 
+              dropout: float = 0.2, **kwargs) -> nn.Module:
+    """Factory function to get model based on architecture name with validation."""
     
-    if architecture.lower() == 'unet':
+    if not isinstance(architecture, str):
+        raise TypeError(f"architecture must be string, got {type(architecture)}")
+    
+    arch_lower = architecture.lower()
+    
+    if arch_lower == 'unet':
         return UNet(in_channels, out_channels, depth, dropout)
-    elif architecture.lower() == 'resunet':
+    elif arch_lower == 'resunet':
         return ResUNet(in_channels, out_channels, depth, dropout)
+    elif arch_lower == 'xrayenhancementnet':
+        return XrayEnhancementNet(in_channels, out_channels)
     else:
-        raise ValueError(f"Unknown architecture: {architecture}")
+        available = ['unet', 'resunet', 'xrayenhancementnet']
+        raise ValueError(f"Unknown architecture '{architecture}'. Available: {available}")
 
 
 # Expert models for specific tasks
 class XrayEnhancementNet(nn.Module):
     """Specialized network for X-ray enhancement with multi-scale processing."""
     
-    def __init__(self, in_channels=1, out_channels=1):
+    def __init__(self, in_channels: int = 1, out_channels: int = 1):
         super(XrayEnhancementNet, self).__init__()
+        
+        if not isinstance(in_channels, int) or in_channels < 1:
+            raise ValueError(f"in_channels must be positive integer, got {in_channels}")
+        if not isinstance(out_channels, int) or out_channels < 1:
+            raise ValueError(f"out_channels must be positive integer, got {out_channels}")
         
         # Multi-scale encoder
         self.scale1 = self._conv_block(in_channels, 32)
@@ -219,24 +287,29 @@ class XrayEnhancementNet(nn.Module):
         # Main UNet
         self.unet = UNet(in_channels, out_channels, depth=3, dropout=0.2)
         
-        # Fusion
+        # Fusion: expects concatenated features
         self.fusion = self._conv_block(32 + out_channels, out_channels)
     
-    def _conv_block(self, in_ch, out_ch):
+    def _conv_block(self, in_ch: int, out_ch: int) -> nn.Sequential:
+        """Create a simple convolution block."""
         return nn.Sequential(
             nn.Conv2d(in_ch, out_ch, 3, padding=1),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
         )
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with multi-scale enhancement."""
+        if not isinstance(x, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(x)}")
+        
         # Main enhancement
         enhanced = self.unet(x)
         
         # Multi-scale features
         feat1 = self.scale1(x)
         
-        # Combine
+        # Combine features
         combined = torch.cat([feat1, enhanced], dim=1)
         output = self.fusion(combined)
         
